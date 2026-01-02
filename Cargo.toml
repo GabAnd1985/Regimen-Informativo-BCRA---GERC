@@ -1,0 +1,10 @@
+[package]
+name = "gerc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+polars = { version = "0.40", features = ["lazy", "csv"] } 
+calamine = "0.22"   
+encoding_rs = "0.8"
+csv = "1.3"
