@@ -1,6 +1,10 @@
 
 use polars::prelude::*;
 use std::{fs, io::Cursor};
+use rusqlite::{Connection, params_from_iter};
+use std::path::PathBuf;
+use std::env;
+use std::io;
 
 //--------------------------------------------------------------------
 //--------------------------------------------------------------------
@@ -8,19 +12,55 @@ use std::{fs, io::Cursor};
 //--------------------------------------------------------------------
 
 fn main() -> PolarsResult<()> {
+
+    let path = ruta_ejecutable()?;
+
+    println!("{}", path.display());
+
     let df_4305 = filtrar_diseno_4305()?;
 
     let df_4306 = filtrar_diseno_4306()?;
 
-    println!("{}", df_4305.head(Some(5)));
+    //println!("{}", df_4305.head(Some(5)));
 
-    println!("{}", df_4305.tail(Some(5)));
+    //println!("{}", df_4305.tail(Some(5)));
 
-    println!("{}", df_4306.head(Some(5)));
+    //println!("{}", df_4306.head(Some(5)));
 
-    println!("{}", df_4306.tail(Some(5)));
+    //println!("{}", df_4306.tail(Some(5)));
 
     Ok(())
+}
+
+
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+
+fn ruta_ejecutable() -> Result<PathBuf, io::Error> {
+    let exe = match env::current_exe() {             //env::current_exe nos devuelve un elemento Result<Ok, Err>
+        Ok(p) => p,
+        Err(e) => {
+                return Err(io::Error::new(
+                e.kind(),
+                format!("Error al obtener la ruta del ejecutable: {e}"),
+                ));
+        }
+    };
+
+    let parent = match exe.parent() {               //Tener en cuenta que el exe.parent nos devuelve un elemento Option<T> 
+                                                    //que puede ser Some o None
+        Some(p) => p,
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No pude obtener el directorio del ejecutable",
+            ));
+        }
+    };
+
+    Ok(parent.to_path_buf())
 }
 
 //--------------------------------------------------------------------
@@ -42,7 +82,7 @@ fn importar_deudores() -> PolarsResult<DataFrame> {
         Err(e) => {
             return Err(
                 PolarsError::ComputeError(
-                    format!("No se pudo leer {file_path}: {e}").into()
+                    format!("No existe el archivo {file_path}: {e}").into()
                 )
             );
         }
@@ -173,7 +213,7 @@ fn filtrar_diseno_4305() -> PolarsResult<DataFrame> {
 
     let df_1 = importar_deudores()?;
 
-    let columna_01 = df_1.column("01")?;
+    let columna_01 = df_1.column("00")?;
     let mascara = columna_01.equal("4305")?;
     let df_4 = df_1.filter(&mascara)?;
 
@@ -221,7 +261,7 @@ fn filtrar_diseno_4306() -> PolarsResult<DataFrame> {
 
     let df_1 = importar_deudores()?;
 
-    let columna_01 = df_1.column("01")?;
+    let columna_01 = df_1.column("00")?;
     let mascara = columna_01.equal("4306")?;
     let df_4 = df_1.filter(&mascara)?;
 
@@ -247,3 +287,39 @@ fn filtrar_diseno_4306() -> PolarsResult<DataFrame> {
 
     Ok(df_5)
 }
+
+
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+
+/*
+
+fn crear_db_nueva(db_path: &str) -> rusqlite::Result<Connection> {
+
+    match fs::remove_file(db_path) {
+        Ok(_) => {
+            println!("Base de datos anterior eliminada: {db_path}");
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // No existía: ok
+        }
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            return Err(rusqlite::Error::ToSqlConversionFailure(
+                format!(
+                    "No se puede reemplazar la base de datos.\n\
+                     El archivo '{db_path}' está en uso por otro programa."
+                )
+                .into(),
+            ));
+        }
+        Err(e) => {
+            return Err(rusqlite::Error::ToSqlConversionFailure(e.into()));
+        }
+    }
+
+    Connection::open(db_path)
+}
+
+*/
