@@ -1,10 +1,14 @@
 
 use polars::prelude::*;
 use std::{fs, io::Cursor};
-use rusqlite::{Connection, params_from_iter};
 use std::path::PathBuf;
 use std::env;
 use std::io;
+use std::io::Write; 
+use std::path::Path;
+use rusqlite::{Connection, Result as SqlResult};
+use polars::prelude::AnyValue;
+
 
 //--------------------------------------------------------------------
 //--------------------------------------------------------------------
@@ -13,21 +17,27 @@ use std::io;
 
 fn main() -> PolarsResult<()> {
 
-    let path = ruta_ejecutable()?;
+    let (deudores, periodo) = importar_deudores()?;
 
-    println!("{}", path.display());
+    let df_4305 = filtrar_diseno_4305(&deudores)?;
 
-    let df_4305 = filtrar_diseno_4305()?;
+    let df_4306 = filtrar_diseno_4306(&deudores)?;
 
-    let df_4306 = filtrar_diseno_4306()?;
+    let base = ruta_ejecutable()?;
 
-    //println!("{}", df_4305.head(Some(5)));
+    let nombre_archivo = format!("deudores_{}.sqlite", periodo);
+    let ruta_sqlite = base.join("Bases").join(nombre_archivo);
 
-    //println!("{}", df_4305.tail(Some(5)));
-
-    //println!("{}", df_4306.head(Some(5)));
-
-    //println!("{}", df_4306.tail(Some(5)));
+    guardar_en_sqlite(
+ruta_sqlite.as_path(),
+        &df_4305,
+        &df_4306,
+    )
+    .map_err(|e| {
+        PolarsError::ComputeError(
+            format!("Error al guardar SQLite: {e}").into()
+        )
+    })?;
 
     Ok(())
 }
@@ -38,8 +48,112 @@ fn main() -> PolarsResult<()> {
 //--------------------------------------------------------------------
 //--------------------------------------------------------------------
 
+
+fn guardar_en_sqlite(db_path: &Path, df_4305: &DataFrame, df_4306: &DataFrame) -> SqlResult<()> {
+
+    let mut conn = Connection::open(db_path)?;
+
+    df_a_tabla_texto(&mut conn, "df_4305", df_4305)?;
+    df_a_tabla_texto(&mut conn, "df_4306", df_4306)?;
+
+    Ok(())
+}
+
+
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+
+
+fn df_a_tabla_texto(conn: &mut Connection, table_name: &str, df: &DataFrame) -> SqlResult<()> {
+
+    let columnas = df.get_columns();
+
+    let mut definicion_columnas = String::new();
+
+    for (i, col) in columnas.iter().enumerate() {
+        if i > 0 {
+            definicion_columnas.push_str(", ");
+        }
+        definicion_columnas.push_str(&format!("\"{}\" TEXT", col.name()));
+    }
+
+    let sql_drop = format!("DROP TABLE IF EXISTS \"{}\";", table_name);
+    let sql_create = format!(
+        "CREATE TABLE \"{}\" ({})",
+        table_name, definicion_columnas
+    );
+
+    conn.execute(&sql_drop, [])?;
+    conn.execute(&sql_create, [])?;
+
+    let mut nombres_columnas = String::new();
+    let mut signos_pregunta = String::new();
+
+    for i in 0..columnas.len() {
+        if i > 0 {
+            nombres_columnas.push_str(", ");
+            signos_pregunta.push_str(", ");
+        }
+
+        nombres_columnas.push_str(&format!("\"{}\"", columnas[i].name()));
+        signos_pregunta.push_str("?");
+    }
+
+    let sql_insert = format!(
+        "INSERT INTO \"{}\" ({}) VALUES ({})",
+        table_name, nombres_columnas, signos_pregunta
+    );
+
+    let tx = conn.transaction()?;
+
+    {
+
+        let mut stmt = tx.prepare(&sql_insert)?;
+
+        for fila in 0..df.height() {
+
+            let mut valores: Vec<String> = Vec::with_capacity(columnas.len());
+
+            for col in columnas {
+                let texto = match col.get(fila) {
+                    Ok(celda) => match celda {
+                        AnyValue::Null => String::new(),
+                        _ => celda.to_string(),
+                    },
+                    Err(_) => String::new(),
+                };
+
+                valores.push(texto);
+            }
+
+
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(valores.len());
+
+            for v in &valores {
+                params.push(v);
+            }
+
+            stmt.execute(params.as_slice())?;
+        }
+
+    }
+
+    tx.commit()?;
+
+    Ok(())
+}
+
+
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+
+
 fn ruta_ejecutable() -> Result<PathBuf, io::Error> {
-    let exe = match env::current_exe() {             //env::current_exe nos devuelve un elemento Result<Ok, Err>
+    let exe = match env::current_exe() {             
         Ok(p) => p,
         Err(e) => {
                 return Err(io::Error::new(
@@ -49,8 +163,8 @@ fn ruta_ejecutable() -> Result<PathBuf, io::Error> {
         }
     };
 
-    let parent = match exe.parent() {               //Tener en cuenta que el exe.parent nos devuelve un elemento Option<T> 
-                                                    //que puede ser Some o None
+    let parent = match exe.parent() {               
+                                                    
         Some(p) => p,
         None => {
             return Err(io::Error::new(
@@ -63,18 +177,90 @@ fn ruta_ejecutable() -> Result<PathBuf, io::Error> {
     Ok(parent.to_path_buf())
 }
 
+
 //--------------------------------------------------------------------
 //--------------------------------------------------------------------
 //--------------------------------------------------------------------
 //--------------------------------------------------------------------
 
 
-fn importar_deudores() -> PolarsResult<DataFrame> {
-    let ruta_func = "C:/Users/anima/Desktop";
-    let fecha_func = "11.2025";
+fn validar_mes_anio(s: &str) -> bool {
+
+    if s.len() != 7 {
+       return false;
+    }     
+
+    let bytes = s.as_bytes();
+    if bytes[2] != b'.' {
+        return false;
+    }
+
+    if !bytes[0].is_ascii_digit() {
+        return false;
+    }
+
+    if !bytes[1].is_ascii_digit() {
+        return false;
+    }
+
+    let primer_digito_mes = (bytes[0] - b'0') as u32;
+
+    let segundo_digito_mes = (bytes[1] - b'0') as u32;
+
+    let mm = primer_digito_mes * 10 + segundo_digito_mes;
+
+    if mm < 1 || mm > 12 {
+        return false;
+    }
+
+    for indice in 3..7 {
+        let byte = bytes[indice];
+
+        if !byte.is_ascii_digit() {
+            return false;
+        }
+    }
+
+    true
+}
 
 
-    let file_path = format!("{}/DEUDORES {}.txt", ruta_func, fecha_func);
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+
+
+fn pedir_mes_anio() -> io::Result<String> {
+    loop {
+        print!("Ingresá el período (MM.YYYY), ej: 11.2025: ");
+        io::stdout().flush()?; 
+
+        let mut input = String::new();    
+        io::stdin().read_line(&mut input)?;   
+
+        let input = input.trim();    
+        if validar_mes_anio(input) {
+            return Ok(input.to_string());
+        }
+
+        println!("\nFormato inválido. Debe ser MM.YYYY. Probá de nuevo.\n");
+    }
+}
+
+
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+
+
+fn parsear_deudores(path: &Path, date: &str) -> PolarsResult<DataFrame> {
+    let ruta_func: PathBuf = path.join("Inputs");
+    let fecha_func = date;
+
+
+    let file_path= ruta_func.join(format!("DEUDORES {}.txt", fecha_func));
 
 
     let bytes = match fs::read(&file_path) {
@@ -82,7 +268,7 @@ fn importar_deudores() -> PolarsResult<DataFrame> {
         Err(e) => {
             return Err(
                 PolarsError::ComputeError(
-                    format!("No existe el archivo {file_path}: {e}").into()
+                    format!("No existe el archivo {}: {e}", file_path.display()).into()
                 )
             );
         }
@@ -209,9 +395,34 @@ fn importar_deudores() -> PolarsResult<DataFrame> {
 //--------------------------------------------------------------------
 
 
-fn filtrar_diseno_4305() -> PolarsResult<DataFrame> {
+fn importar_deudores() -> PolarsResult<(DataFrame, String)> {
 
-    let df_1 = importar_deudores()?;
+    let base = ruta_ejecutable()?;
+
+    loop {
+
+        let periodo = pedir_mes_anio()?;
+
+        let resultado = parsear_deudores(&base, &periodo);
+
+        match resultado {
+            Ok(df) => return Ok((df, periodo)),
+            Err(_) => {
+                println!("\nNo se encuentra el archivo Deudores {}.\n", periodo);
+            }
+        }
+    }
+
+}
+
+
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+//--------------------------------------------------------------------
+
+
+fn filtrar_diseno_4305(df_1: &DataFrame) -> PolarsResult<DataFrame> {
 
     let columna_01 = df_1.column("00")?;
     let mascara = columna_01.equal("4305")?;
@@ -257,9 +468,7 @@ fn filtrar_diseno_4305() -> PolarsResult<DataFrame> {
 //--------------------------------------------------------------------
 
 
-fn filtrar_diseno_4306() -> PolarsResult<DataFrame> {
-
-    let df_1 = importar_deudores()?;
+fn filtrar_diseno_4306(df_1: &DataFrame) -> PolarsResult<DataFrame> {
 
     let columna_01 = df_1.column("00")?;
     let mascara = columna_01.equal("4306")?;
@@ -289,37 +498,5 @@ fn filtrar_diseno_4306() -> PolarsResult<DataFrame> {
 }
 
 
-//--------------------------------------------------------------------
-//--------------------------------------------------------------------
-//--------------------------------------------------------------------
-//--------------------------------------------------------------------
 
-/*
 
-fn crear_db_nueva(db_path: &str) -> rusqlite::Result<Connection> {
-
-    match fs::remove_file(db_path) {
-        Ok(_) => {
-            println!("Base de datos anterior eliminada: {db_path}");
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            // No existía: ok
-        }
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-            return Err(rusqlite::Error::ToSqlConversionFailure(
-                format!(
-                    "No se puede reemplazar la base de datos.\n\
-                     El archivo '{db_path}' está en uso por otro programa."
-                )
-                .into(),
-            ));
-        }
-        Err(e) => {
-            return Err(rusqlite::Error::ToSqlConversionFailure(e.into()));
-        }
-    }
-
-    Connection::open(db_path)
-}
-
-*/
