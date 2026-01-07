@@ -120,6 +120,12 @@ fn df_a_tabla_texto(conn: &mut Connection, table_name: &str, df: &DataFrame) -> 
                 let texto = match col.get(fila) {
                     Ok(celda) => match celda {
                         AnyValue::Null => String::new(),
+
+                        // Strings: tomar el contenido real (sin comillas)
+                        AnyValue::String(s) => s.to_string(),
+                        AnyValue::StringOwned(s) => s.to_string(),
+
+                        // Números/bools/otros: acá sí podés usar to_string()
                         _ => celda.to_string(),
                     },
                     Err(_) => String::new(),
